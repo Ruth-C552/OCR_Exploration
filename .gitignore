@@ -1,0 +1,81 @@
+# ======================
+# Python
+# ======================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# ======================
+# Virtual Environments
+# ======================
+venv/
+.env/
+.env.*
+
+# ======================
+# IDE / Editors
+# ======================
+.vscode/
+.idea/
+*.swp
+
+# ======================
+# OS Files
+# ======================
+.DS_Store
+Thumbs.db
+
+# ======================
+# OCR Outputs
+# ======================
+annotated_detections.jpg
+extracted_*.csv
+extracted_*.xlsx
+
+# ======================
+# Images / Test Data
+# ======================
+*.jpeg
+*.jpg
+*.png
+*.tiff
+*.bmp
+*.pdf
+
+# ======================
+# Logs / Temp
+# ======================
+*.log
+*.tmp
+
+# ======================
+# Model Caches
+# ======================
+.cache/
+.huggingface/
+torch_cache/
+tensorflow_cache/
+
+# ======================
+# ML / OCR Model Files
+# ======================
+*.pt
+*.pth
+*.onnx
+*.ckpt
+*.bin
+
+# ======================
+# Paddle / OCR Caches
+# ======================
+.paddle/
+.paddlehub/
+.paddleocr/
+paddle_cache/
+
+# ======================
+# Python package exports
+# ======================
+pip-freeze.txt
+requirements.txt
