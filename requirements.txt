@@ -1,0 +1,11 @@
+opencv-python
+numpy
+torch
+transformers
+pillow
+easyocr
+suryaocr
+pandas
+openpyxl
+scikit-learn
+matplotlib
