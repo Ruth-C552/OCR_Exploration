@@ -8,7 +8,6 @@ from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 import torch
 from datetime import datetime
 from sklearn.cluster import KMeans
-from surya import run_ocr
 
 
 FORM_COLUMNS = [
@@ -73,7 +72,7 @@ class FormOCRProcessor:
     # ---------------- COLUMN DETECTION ----------------
     def detect_column_centers(self, detections):
         centers = {}
-        for bbox, text, conf in detections:
+        for bbox, text, _ in detections:
             t = text.lower()
             x = int(bbox[0][0])
             for col in FORM_COLUMNS:
@@ -105,8 +104,20 @@ class FormOCRProcessor:
 
         return self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
 
+    # ---------------- NUMERIC OCR ----------------
+    def recognize_numeric(self, roi):
+        results = self.detector.readtext(
+            roi,
+            allowlist="0123456789/.-+",
+            detail=0
+        )
+        if not results:
+            return ""
+        text = "".join(results)
+        return re.sub(r"\s+", "", text)
+
     # ---------------- ROW GROUPING ----------------
-    def group_rows(self, detections, threshold=20):
+    def group_rows(self, detections, threshold=28):
         rows = []
         for det in sorted(detections, key=lambda x: x[0][0][1]):
             y = det[0][0][1]
@@ -125,72 +136,49 @@ class FormOCRProcessor:
         if record["Sex"]:
             record["Sex"] = record["Sex"].strip().upper()[0]
 
-        for col in ("Age", "Children Alive"):
-            if record[col]:
-                m = re.search(r"\d+", record[col])
-                record[col] = int(m.group()) if m else None
+        if record["Age"]:
+            m = re.search(r"\d{1,3}", record["Age"])
+            record["Age"] = int(m.group()) if m else None
 
-        addr = record["Residential Address"].lower()
-        if "meanwood" in addr:
-            record["Residential Address"] = "Meanwood"
+        if record["Children Alive"]:
+            m = re.search(r"\d+", record["Children Alive"])
+            record["Children Alive"] = int(m.group()) if m else None
+
+        if record["Contact"]:
+            record["Contact"] = re.sub(r"[^\d+]", "", record["Contact"])
+
+        if record["Date of Visit"]:
+            record["Date of Visit"] = record["Date of Visit"].replace(" ", "")
 
         return record
 
     # ---------------- VALID ROW ----------------
     def is_valid_data_row(self, record):
         header_keywords = {
-            "hts", "number", "date", "visit", "name",
-            "address", "contact", "age", "sex", "children",
-            "marital", "status", "tested", "before", "result", "test", "alive", "registration", "details",
-            "month", "year", "laj", "lcl", "L", "th", "ecexay", "iffrey", "freits", "statu", "resid", "addres", "hitsnumber",
-            "laj", "L"
+            "hts", "date", "name", "address", "contact", "age",
+            "sex", "children", "marital", "tested", "result"
         }
-        #combine all text in row
         row_text = " ".join(str(v).lower() for v in record.values() if v)
-        
-        # reject obvious header rows
         keyword_hits = sum(1 for k in header_keywords if k in row_text)
         digit_count = sum(c.isdigit() for c in row_text)
+
         if keyword_hits >= 2 and digit_count == 0:
             return False
-        
-        # require at least one real identifier
+
         return bool(record["HTS Number"] or record["Name"])
 
-    #----------------- Detect numeric ROI's ----------------
-    def is_numeric_heavy(self, text_hint="", roi=None):
-        """
-        Decide whether ROI should go to SuryaOCR
-        """
-        if text_hint:
-            digits = sum(c.isdigit() for c in text_hint)
-            return digits >= max(2, len(text_hint) // 2)
-
-        if roi is not None:
-            h, w = roi.shape[:2]
-            return w < 160  # numeric cells are usually narrow
-
-        return False
-
-    #-------------------- SuryaOCR Recognition ----------------
-    def recognize_with_surya(self, roi):
-        pil_img = Image.fromarray(roi).convert("RGB")
-
-        results = run_ocr(
-            images=[pil_img],
-            langs=["en"],
-        )
-
-        if not results or not results[0]:
-            return ""
-
-        return " ".join(
-            block["text"] for block in results[0] if "text" in block
-        ).strip()
     # ---------------- TABLE EXTRACTION ----------------
     def extract_table(self, detections):
         rows = self.group_rows(detections)
         records = []
+
+        NUMERIC_COLS = {
+            "HTS Number",
+            "Date of Visit",
+            "Age",
+            "Children Alive",
+            "Contact"
+        }
 
         for row in rows:
             record = {col: "" for col in FORM_COLUMNS}
@@ -201,30 +189,29 @@ class FormOCRProcessor:
                 w = int(bbox[1][0] - bbox[0][0])
                 h = int(bbox[2][1] - bbox[0][1])
 
-                if h < 18:
+                if h < 28:
                     continue
 
                 roi = self.image[y:y+h, x:x+w]
                 if roi.size == 0:
                     continue
 
-                # Decide OCR engine
-                if self.is_numeric_heavy(text, roi):
-                    final_text = self.recognize_with_surya(roi)
+                col = self.assign_column(x)
+
+                if col in NUMERIC_COLS:
+                    final_text = self.recognize_numeric(roi)
                 elif conf < 0.65:
-                    final_text = self.recognize_with_trocr(roi)
+                    final_text = self.recognize_with_trocr(
+                        cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                    )
                 else:
                     final_text = text
 
-                final_text = re.sub(r"[^A-Za-z0-9+/.\- ]", "", final_text).strip()
-                if not final_text:
-                    continue
-
-                col = self.assign_column(x)
-                record[col] += " " + final_text
+                final_text = re.sub(r"\s+", " ", final_text).strip()
+                if final_text:
+                    record[col] += " " + final_text
 
             record = {k: v.strip() for k, v in record.items()}
-
             record = self.normalize_record(record)
 
             if self.is_valid_data_row(record):
@@ -266,7 +253,7 @@ class FormOCRProcessor:
 
 # ---------------- RUN ----------------
 if __name__ == "__main__":
-    processor = FormOCRProcessor("TestImage4.jpeg")
+    processor = FormOCRProcessor("TestImage2.jpeg")
     df = processor.process()
 
     pd.set_option("display.max_columns", None)
