@@ -79,7 +79,28 @@ class FormOCRProcessor:
                 if col.lower().split()[0] in t and col not in centers:
                     centers[col] = x
         return centers
+    
+    #---------------- Define X ranges -------------------
+    def build_column_zones(self):
+        centers = sorted(self.column_centers.items(), key=lambda x: x[1])
+        zones = {}
 
+        for i, (col, x) in enumerate(centers):
+            if i == 0:
+                left = 0
+            else:
+                left = (centers[i-1][1] + x) // 2
+
+            if i == len(centers) - 1:
+                right = 10_000
+            else:
+                right = (x + centers[i+1][1]) // 2
+
+            zones[col] = (left, right)
+
+        return zones
+
+    #---------------- FALLBACK COLUMN CENTERS ----------------
     def fallback_column_centers(self, detections):
         xs = np.array([int(bbox[0][0]) for bbox, _, _ in detections]).reshape(-1, 1)
         kmeans = KMeans(n_clusters=len(FORM_COLUMNS), random_state=42)
@@ -87,11 +108,22 @@ class FormOCRProcessor:
         centers = sorted(int(c[0]) for c in kmeans.cluster_centers_)
         return dict(zip(FORM_COLUMNS, centers))
 
+    #---------------- ASSIGN COLUMN ----------------
     def assign_column(self, x):
-        return min(
-            self.column_centers,
-            key=lambda c: abs(x - self.column_centers[c])
-        )
+        best_col = None
+        best_dist = float("inf")
+
+        for col, (l, r) in self.column_zones.items():
+            center = (l + r) // 2
+            dist = abs(x - center)
+
+            if l <= x <= r or dist < 50:  # ← tolerance
+                if dist < best_dist:
+                    best_col = col
+                    best_dist = dist
+
+        return best_col
+
 
     #---------------- Deskew correction ----------------
     def deskew(self, img):
@@ -219,6 +251,16 @@ class FormOCRProcessor:
         if record["Date of Visit"]:
             record["Date of Visit"] = record["Date of Visit"].replace(" ", "")
 
+        # ---- normalize & validate date ----
+        if record["Date of Visit"]:
+            raw = record["Date of Visit"].replace(" ", "")
+            raw = raw.replace("-", "/")
+
+            if self.is_valid_date(raw):
+                record["Date of Visit"] = raw
+            else:
+                record["Date of Visit"] = ""
+
         return record
 
     # ---------------- VALID ROW ----------------
@@ -236,6 +278,7 @@ class FormOCRProcessor:
 
         return bool(record["HTS Number"] or record["Name"])
 
+    #---------------- VALID NUMERIC ----------------
     def is_valid_numeric(self, text):
         """
         Accept only clean numeric strings for numeric columns
@@ -244,6 +287,16 @@ class FormOCRProcessor:
             return False
 
         return bool(re.fullmatch(r"[0-9/.\-]+", text))
+
+    #---------------- Date COLUMN ZONES ----------------
+    def is_valid_date(self, text):
+        return bool(re.fullmatch(r"\d{1,2}/\d{1,2}/\d{2,4}", text))
+
+    #---------------- Normalize date ----------------
+    def normalize_date_text(self, text):
+        text = text.replace(" ", "")
+        text = text.replace("-", "/")
+        return text
 
     # ---------------- TABLE EXTRACTION ----------------
     def extract_table(self, detections):
@@ -258,6 +311,8 @@ class FormOCRProcessor:
             "Contact"
         }
 
+        SEX_COL = "Sex"
+        
         for row in rows:
             record = {col: "" for col in FORM_COLUMNS}
 
@@ -275,22 +330,37 @@ class FormOCRProcessor:
                     continue
 
                 col = self.assign_column(x)
+                if not col:
+                    continue   
 
-                if col in NUMERIC_COLS and w > 120:
+                # --- numeric columns ---
+                if col in NUMERIC_COLS:
                     final_text = self.recognize_numeric(roi)
-                    if not final_text or not self.is_valid_numeric(final_text):
+
+                    if not final_text:
                         continue
+
+                    # DO NOT validate Date yet
+                    if col != "Date of Visit" and not self.is_valid_numeric(final_text):
+                        continue
+
+
+                # --- sex column ---
+                elif col == SEX_COL:
+                    final_text = text.strip().upper()
+                    if final_text not in {"M", "F"}:
+                        continue
+
+                # --- normal text ---
                 elif conf < 0.65:
-                    final_text = self.recognize_with_trocr(
-                        cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-                    )
+                    final_text = self.recognize_with_trocr(cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY))
                 else:
                     final_text = text
-
-                final_text = re.sub(r"\s+", " ", final_text).strip()
+                    
+                final_text = final_text.strip()
                 if final_text:
                     record[col] += " " + final_text
-
+    
             record = {k: v.strip() for k, v in record.items()}
             record = self.normalize_record(record)
 
@@ -320,6 +390,8 @@ class FormOCRProcessor:
         print("Column centers:")
         for k, v in self.column_centers.items():
             print(f"{k:20s} -> x={v}")
+            
+        self.column_zones = self.build_column_zones()
 
         self.visualize_detections(detections)
         return pd.DataFrame(self.extract_table(detections), columns=FORM_COLUMNS)
