@@ -5,7 +5,7 @@ import re
 import matplotlib.pyplot as plt
 
 #image path
-image_path = 'TestImage2.jpeg'
+image_path = 'Screenshot From 2025-10-27 14-20-04.png'
 
 #load image
 img = cv2.imread(image_path)
